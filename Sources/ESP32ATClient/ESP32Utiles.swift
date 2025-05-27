@@ -29,6 +29,10 @@ public enum ESP32ATClientError: Error {
     case responseError
     case receivePromptFailed
     case resetError
+
+   // UDP Errors
+    case sendFail
+    case connectionCloseFailed
 }
 
 // public enum ESP32ATClientJoinWiFiError: Error {

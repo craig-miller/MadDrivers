@@ -34,13 +34,16 @@ public final class ESP32ATClient {
 
     private var receivedBytes: [UInt8]
     private var lastByte = UInt8(0)
-    
+
     /// Current ESP32 status.
     public private(set) var esp32Status: ESP32Status = .initialization
     /// Current Wi-Fi status.
     public private(set) var wifiStatus: WiFiStatus = .disconnected
     /// Current Wi-Fi connection status.
     public private(set) var connectionStatus: ConnectionStatus = .closed
+
+    // Maintain any active UDP Connections
+    private var udpConnections: [UDPConnection] = []
 
     lazy var readyCallback: URCCallback = { [unowned(unsafe) self] (str: String) -> Void in
         esp32Status = .ready
@@ -82,7 +85,7 @@ public final class ESP32ATClient {
     lazy var connectionCloseCallback: URCCallback = { [unowned(unsafe) self] (str: String) in
         connectionStatus = .closed
     }
-    
+
     /// Initialize the ESP32.
     /// - Parameters:
     ///   - uart: **REQUIRED** The UART port to which the ESP32 is connected.
@@ -215,14 +218,14 @@ extension ESP32ATClient {
         let request = ATRequest(ATCommand.execute(command: ""))
         return try executeRequest(request).ok
     }
-    
+
     /// Trigger ESP32 software reset.
     /// - Returns: A boolean value indicating whether the setting was successful.
     public func softReset() throws(ESP32ATClientError) -> Bool {
         let request = ATRequest(ATCommand.execute(command: "+RST"))
         return try executeRequest(request).ok
     }
-    
+
     /// Turn on/off AT command echoing.
     /// - Parameter enable: Enable or disable echoing.
     /// - Returns: A boolean value indicating whether the setting was successful.
@@ -234,7 +237,7 @@ extension ESP32ATClient {
 
         return response.ok
     }
-    
+
     /// Reset the ESP32.
     public func reset() throws(ESP32ATClientError) {
         rst.low()
@@ -259,7 +262,7 @@ extension ESP32ATClient {
             }
         }
     }
-    
+
     /// Restore factory default settings.
     public func restore() throws(ESP32ATClientError) {
         let request = ATRequest(ATCommand.execute(command: "+RESTORE"))
@@ -288,7 +291,7 @@ extension ESP32ATClient {
 
         throw ESP32ATClientError.responseError
     }
-    
+
     /// Set baud rate of the UART communication.
     /// - Parameters:
     ///   - speed: UART baud rate.
@@ -303,7 +306,7 @@ extension ESP32ATClient {
 
         return response.ok
     }
-    
+
     /// Get firmware version infomation.
     /// - Returns: AT version, SDK version, compile time and Bin version.
     public func getVersion() throws(ESP32ATClientError) -> String {
@@ -325,7 +328,7 @@ extension ESP32ATClient {
 
 
 extension ESP32ATClient {
-    
+
     /// Get current Wi-Fi mode.
     /// - Returns: A Wi-Fi mode Indicating whether the ESP32 works as a station, an AP, both, or neither.
     public func getWiFiMode() throws(ESP32ATClientError) -> WiFiMode {
@@ -353,10 +356,10 @@ extension ESP32ATClient {
                 }
             }
         }
-        
+
         return mode
     }
-    
+
     /// Set the ESP32 Wi-Fi Mode.
     /// - Parameters:
     ///   - newMode: The Wi-Fi Mode: `station`, `softAP`, `stationSoftAP`or `none`.
@@ -365,7 +368,7 @@ extension ESP32ATClient {
     public func setWiFiMode(_ newMode: WiFiMode, autoConnect: Bool = true) throws(ESP32ATClientError) -> Bool {
         let command = "+CWMODE"
         let parameter = newMode.rawValue + (autoConnect ? ",1" : ",0")
-        
+
         let request = ATRequest(ATCommand.setup(command: command, parameter: parameter))
         let response = try executeRequest(request)
 
@@ -374,7 +377,7 @@ extension ESP32ATClient {
         }
         return false
     }
-    
+
     /// Connect an ESP32 station to the specified AP.
     /// - Parameters:
     ///   - ssid: The Wi-Fi name.
@@ -418,7 +421,7 @@ extension ESP32ATClient {
             }
         }
     }
-    
+
     /// Disconnect from the AP.
     /// - Returns: A boolean value indicating whether the disconnection was successful.
     public func leaveAP() throws(ESP32ATClientError) -> Bool {
@@ -428,7 +431,7 @@ extension ESP32ATClient {
         let response = try executeRequest(request)
         return response.ok
     }
-    
+
     /// Get the IP address of the ESP32 Station.
     /// - Returns: The IP address, gateway and netmask.
     public func getStationIP() throws(ESP32ATClientError) -> [String] {
@@ -449,7 +452,7 @@ extension ESP32ATClient {
 
         throw ESP32ATClientError.responseError
     }
-    
+
     /// Enable/disable Wi-Fi connection configuration via Web server.
     /// - Parameter enable: Enable or disable the configuration.
     /// - Returns: A boolean value indicating whether the setting was successful.
@@ -490,7 +493,7 @@ extension ESP32ATClient {
 
         throw ESP32ATClientError.responseError
     }
-    
+
     /// Send HTTP GET requests to a web server with additional HTTP headers.
     /// - Parameters:
     ///   - url: The URL of the server to which the request will be sent.
@@ -534,7 +537,7 @@ extension ESP32ATClient {
 
         throw ESP32ATClientError.responseError
     }
-    
+
     /// Send HTTP GET requests to a web server
     /// - Parameters:
     ///   - url: The URL of the server to which the request will be sent.
@@ -563,7 +566,7 @@ extension ESP32ATClient {
 
         throw ESP32ATClientError.responseError
     }
-    
+
     /// Perform an HTTP POST request to a web server.
     /// - Parameters:
     ///   - url: The URL of the server to which the POST request will be sent.
@@ -578,7 +581,7 @@ extension ESP32ATClient {
         if headers.count > 0 {
             parameter += "," + String(headers.count)
             for item in headers {
-                parameter += ",\"" + item + "\"" 
+                parameter += ",\"" + item + "\""
             }
         }
 
@@ -641,4 +644,133 @@ public extension ESP32ATClient {
         case softAP = "2"
         case stationSoftAP = "3"
     }
+
+    enum ConnectionType {
+        case tcp
+        case udp
+    }
+
+    struct UDPConnection {
+        public let id: Int
+        public let remoteIP: String
+        public let remotePort: Int
+        public let localPort: Int
+    }
+
+
+    /// Establishes a UDP connection to a remote host
+    /// - Parameters:
+    ///   - remoteIP: The IP address of the remote host
+    ///   - remotePort: The port number of the remote host
+    ///   - localPort: The local port to bind to (optional)
+    /// - Returns: A UDPConnection object if successful
+    /// - Throws: ESP32ATClientError if the connection fails
+    func createUDPConnection(remoteIP: String, remotePort: Int, localPort: Int? = nil) throws(ESP32ATClientError) -> UDPConnection {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Enabled multiple connections
+        // https://docs.espressif.com/projects/esp-at/en/latest/esp32c3/AT_Command_Examples/TCP-IP_AT_Examples.html#udp-transmission-with-fixed-remote-ip-address-and-port
+        try writeString("AT+CIPMUX=1" + "\r\n")
+        // try writeString("AT+CIPSTA?" + "\r\n")
+
+        // Wait for response
+        var noResponse: Bool = true
+        while noResponse {
+            let line = try readLine(timeout: 50000)
+            print("RESPONSE: \(line)")
+            if !line.isEmpty {
+                if !line.hasPrefix("OK") {
+                    throw .connectFailed
+                } else {
+                    print("ESP32: Multiple Connections Enabled")
+                    noResponse = false
+                }
+            }
+        }
+
+        // Find next available connection ID
+        let nextId = udpConnections.count + 1
+
+        // Create UDP connection command
+        var cmd = "AT+CIPSTART=\(nextId),\"UDP\",\"\(remoteIP)\",\(remotePort)"
+        if let localPort = localPort {
+            cmd += ",\(localPort)"
+        }
+        // TODO:  Add 0 to the end.  See the esspresif docs.
+        // https://docs.espressif.com/projects/esp-at/en/latest/esp32c3/AT_Command_Examples/TCP-IP_AT_Examples.html#udp-transmission-with-fixed-remote-ip-address-and-port
+
+        print(cmd)
+        try writeString(cmd + "\r\n")
+
+        // Wait for response
+        while true {
+            let line = try readLine(timeout: 5000)
+            if !line.isEmpty {
+                print("UDP RESPONSE: \(line)")
+                if line == "\(nextId),CONNECT" {
+                    let connection = UDPConnection(id: nextId, remoteIP: remoteIP, remotePort: remotePort, localPort: localPort ?? 0)
+                    udpConnections.append(connection)
+                    return connection
+                } else if line.hasPrefix("ERROR") {
+                    throw .connectFailed
+                }
+            }
+        }
+    }
+
+    /// Sends data over a UDP connection
+    /// - Parameters:
+    ///   - connection: The UDP connection to send data over
+    ///   - data: The data to send
+    /// - Throws: ESP32ATClientError if the send fails
+    func sendUDPData(_ connection: UDPConnection, data: String) throws(ESP32ATClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Send data length command
+        let lengthCmd = "AT+CIPSEND=\(connection.id),\(data.count)\r\n"
+        try writeString(lengthCmd)
+
+        // Wait for prompt
+        try waitPrompt()
+
+        // Send actual data
+        try writeString(data)
+
+        // Wait for send confirmation
+        while true {
+            let line = try readLine(timeout: 5000)
+            if line.hasPrefix("SEND OK") {
+                return
+            } else if line.hasPrefix("SEND FAIL") {
+                throw .sendFail
+            }
+        }
+    }
+
+    /// Closes a UDP connection
+    /// - Parameter connection: The UDP connection to close
+    /// - Throws: ESP32ATClientError if the close fails
+    func closeUDPConnection(_ connection: UDPConnection) throws(ESP32ATClientError) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let cmd = "AT+CIPCLOSE=\(connection.id)\r\n"
+        try writeString(cmd)
+
+        while true {
+            let line = try readLine(timeout: 5000)
+            if line.hasPrefix("CLOSED") {
+                if let index = udpConnections.firstIndex(where: { $0.id == connection.id }) {
+                    udpConnections.remove(at: index)
+                }
+                return
+            } else if line.hasPrefix("ERROR") {
+                throw .connectionCloseFailed
+            }
+        }
+    }
 }
+
+
